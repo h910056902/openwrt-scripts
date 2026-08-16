@@ -24,7 +24,7 @@ PKG_DIR="$SDCARD/pkgs"
 
 # ---------- 1. SD 卡分区与挂载 ----------
 info "步骤 1/7: 检查 SD 卡空间"
-if ! mountpoint -q $SDCARD 2>/dev/null; then
+if ! mount | grep -q " $SDCARD "; then
   info "未挂载 $SDCARD，检测分区..."
   if [ ! -b /dev/mmcblk0p7 ]; then
     warn "创建 p7 分区 (占用未使用空间)..."
@@ -103,7 +103,7 @@ fi
 sleep 8
 # 清理残留：只清理可能卡住的 socket/pid，不杀进程
 if [ ! -S /var/run/docker.sock ]; then
-  pkill -9 dockerd 2>/dev/null; pkill -9 containerd 2>/dev/null; sleep 2
+  for p in $(pidof dockerd) $(pidof containerd); do kill -9 $p 2>/dev/null; done; sleep 2
   rm -f /var/run/docker.pid /var/run/docker.sock 2>/dev/null
   rm -rf /var/run/docker /var/run/containerd 2>/dev/null
   /etc/init.d/dockerd start 2>/dev/null || true
