@@ -20,6 +20,112 @@ cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 docker_installed() { [ -x /usr/bin/docker ] && docker --version >/dev/null 2>&1; }
 routergo_installed() { [ -x /usr/sbin/routergo ] && [ -f /usr/lib/lua/luci/controller/routerdog.lua ]; }
 dockerman_installed() { [ -f /usr/lib/lua/luci/controller/dockerman.lua ]; }
+# ============================================================
+#  OpenClash AI 节点优化函数
+# ============================================================
+ai_node_optimize() {
+  AUTH="Authorization: Bearer 5rcYEBgQ"
+  BASE="http://127.0.0.1:9090"
+  GROUP="宝贝云"
+  AI_URLS="https://chatgpt.com https://claude.ai https://gemini.google.com"
+
+  echo ""
+  echo "=== 订阅链接配置 ==="
+  CUR_SUB=$(uci get openclash.@subscribe[0].address 2>/dev/null)
+  if [ -n "$CUR_SUB" ] && [ "$CUR_SUB" != "uci: Invalid" ]; then
+    echo "  当前订阅: ${CUR_SUB:0:50}..."
+    printf "%b  是否更换新订阅链接？[y/N] %b" "$YELLOW" "$NC"
+    read CHG_SUB
+    case "$CHG_SUB" in
+      y|Y)
+        printf "  请输入新订阅链接: "
+        read NEW_SUB
+        if [ -n "$NEW_SUB" ]; then
+          uci set openclash.@subscribe[0].address="$NEW_SUB"
+          uci set openclash.@config_subscribe[0].address="$NEW_SUB"
+          uci commit openclash
+          echo "  ✅ 已更换订阅链接（请在 OpenClash 界面点击更新订阅）"
+        fi
+        ;;
+      *)
+        echo "  保留当前订阅";;
+    esac
+  else
+    printf "  未检测到订阅，是否输入新订阅链接？[y/N]: "
+    read CHG_SUB2
+    case "$CHG_SUB2" in
+      y|Y)
+        printf "  请输入订阅链接: "
+        read NEW_SUB2
+        if [ -n "$NEW_SUB2" ]; then
+          uci set openclash.@subscribe[0].address="$NEW_SUB2"
+          uci commit openclash
+          echo "  ✅ 已设置订阅链接"
+        fi
+        ;;
+      *)
+        echo "  跳过订阅配置";;
+    esac
+  fi
+
+  echo ""
+  echo "=== 测速并切换最快 AI 节点 ==="
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  需要 jq 支持，跳过测速"
+    return 1
+  fi
+  CUR_NODE=$(curl -s -H "$AUTH" $BASE/proxies 2>/dev/null | jq -r ".proxies[\"$GROUP\"].now" 2>/dev/null)
+  [ -n "$CUR_NODE" ] && echo "  当前节点: $CUR_NODE"
+  echo "  测速目标: ChatGPT + Claude + Gemini"
+  echo ""
+
+  curl -s -H "$AUTH" $BASE/proxies | jq -r '.proxies | to_entries[] | select(.value.type == "Vless" or .value.type == "Vmess" or .value.type == "Trojan" or .value.type == "Shadowsocks" or .value.type == "Hysteria" or .value.type == "Hysteria2" or .value.type == "TUIC") | .key' > /tmp/ai_nodes_raw.txt 2>/dev/null
+  grep -vE "剩余流量|距离下次重置|套餐到期|无法使用|直连地址|邀请好友|TG群|只有新加坡|更换客户端" /tmp/ai_nodes_raw.txt > /tmp/ai_nodes.txt 2>/dev/null
+  TOTAL=$(wc -l < /tmp/ai_nodes.txt 2>/dev/null)
+  echo "  检测到 $TOTAL 个真实节点，开始测速（约 2-3 分钟）..."
+  echo ""
+
+  BEST_SUM=999999
+  BEST_NODE=""
+  COUNT=0
+  while IFS= read -r node; do
+    [ -z "$node" ] && continue
+    COUNT=$((COUNT+1))
+    ENC=$(echo "$node" | jq -rn --arg s "$node" '$s | @uri')
+    SUM=0; FAIL=0; OK=0
+    for url in $AI_URLS; do
+      UENC=$(echo "$url" | jq -rn --arg s "$url" '$s | @uri')
+      R=$(curl -s -m 5 -H "$AUTH" "$BASE/proxies/$ENC/delay?timeout=4000&url=$UENC" 2>/dev/null)
+      D=$(echo "$R" | jq -r '.delay // "FAIL"' 2>/dev/null)
+      if [ "$D" = "FAIL" ] || [ -z "$D" ]; then
+        FAIL=$((FAIL+1))
+      else
+        SUM=$((SUM+D)); OK=$((OK+1))
+      fi
+    done
+    if [ "$OK" -gt 0 ]; then
+      AVG=$((SUM/OK))
+      printf "    [%-3d/%-3d] %-32s %4d ms\n" "$COUNT" "$TOTAL" "$node" "$AVG"
+      if [ "$AVG" -lt "$BEST_SUM" ]; then
+        BEST_SUM=$AVG; BEST_NODE="$node"
+      fi
+    fi
+  done < /tmp/ai_nodes.txt
+
+  echo ""
+  if [ -n "$BEST_NODE" ]; then
+    echo "  🏆 AI 最快节点: $BEST_NODE (平均 ${BEST_SUM}ms)"
+    echo "  自动切换 $GROUP -> $BEST_NODE ..."
+    GENC=$(echo "$GROUP" | jq -rn --arg s "$GROUP" '$s | @uri')
+    curl -s -X PUT -H "$AUTH" -H "Content-Type: application/json" --data-binary "{\"name\":\"$BEST_NODE\"}" "$BASE/proxies/$GENC" >/dev/null 2>&1
+    sleep 2
+    NEW_NODE=$(curl -s -H "$AUTH" $BASE/proxies | jq -r ".proxies[\"$GROUP\"].now")
+    [ -n "$NEW_NODE" ] && echo "  ✅ 已切换: $NEW_NODE" || echo "  ⚠️ 切换需确认"
+  else
+    echo "  ❌ 未找到可用节点，请检查 OpenClash 是否运行"
+  fi
+  rm -f /tmp/ai_nodes.txt /tmp/ai_nodes_raw.txt
+}
 
 SDCARD="/mnt/sdcard"; DOCKER_ROOT="$SDCARD/docker"; PKG_DIR="$SDCARD/pkgs"
 
@@ -192,4 +298,21 @@ echo "  → Docker管理: LuCI 菜单 → Docker"
 echo "  → 数据目录:   $DOCKER_ROOT"
 echo ""
 echo "  部署应用: docker run -d --name 名称 镜像"
+echo ""echo ""
+echo "=============================================="
+echo "  OpenClash AI 节点优化器（可选）"
+echo "  功能: 测速节点对 AI 网站延迟，自动切换最快节点"
+echo "=============================================="
+echo ""
+printf "%b  是否运行节点优化器？[y/N] %b" "$YELLOW" "$NC"
+read RUN_AI
+case "$RUN_AI" in
+  y|Y|yes|YES)
+    echo "▶ 运行 OpenClash AI 节点优化器..."
+    ai_node_optimize
+    ;;
+  *)
+    echo "跳过节点优化。"
+    ;;
+esac
 echo ""
