@@ -382,7 +382,7 @@ main_menu() {
   echo ""
   echo "  系统信息:"
   info "架构: $(uname -m)"
-  MEM_KB=$(free | awk '/Mem:/{print $7}'); MEM_MB=$((MEM_KB/1024)); info "内存: \${MEM_MB} MB 可用"
+  MEM_KB=$(free | awk '/Mem:/{print $7}'); MEM_MB=$((MEM_KB/1024)); info "内存: ${MEM_MB} MB 可用"
   [ -n "$(docker --version 2>/dev/null)" ] && info "Docker: 已安装" || info "Docker: 未安装"
   echo ""
   echo "  ┌──────────────────────────────┐"
