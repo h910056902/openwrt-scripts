@@ -27,6 +27,81 @@ docker_installed() { [ -x /usr/bin/docker ] && docker --version >/dev/null 2>&1;
 routergo_installed() { [ -x /usr/sbin/routergo ] && [ -f /usr/lib/lua/luci/controller/routerdog.lua ]; }
 dockerman_installed() { [ -f /usr/lib/lua/luci/controller/dockerman.lua ]; }
 
+# ========== 功能6: 配置 OpenClash ==========
+openclash_install() {
+  section "OpenClash 配置"
+  SUB_URL="https://a.bbydy.org/api/bby/client/subscribe?token=aae6a0a85203674b697f43c7987160a4"
+  OC_VERSION="0.47.156"
+  BEST_NODE="L1|香港03|中转|流媒体|4x"
+
+  # 检查是否已安装
+  if [ -f /etc/init.d/openclash ] && [ -f /etc/openclash/core/clash_meta ]; then
+    ok "OpenClash 已安装，跳过安装"
+  else
+    info "安装依赖 (ruby/unzip/ip-full)..."
+    opkg update >/dev/null 2>&1
+    for dep in unzip ip-full ruby ruby-yaml; do
+      opkg list-installed 2>/dev/null | grep -q "^$dep " || opkg install $dep >/dev/null 2>&1
+    done
+    info "下载 OpenClash v$OC_VERSION..."
+    mkdir -p /tmp/oc-install && cd /tmp/oc-install
+    curl -fsSL -o luci-app-openclash.ipk "https://github.com/vernesong/OpenClash/releases/download/v${OC_VERSION}/luci-app-openclash_${OC_VERSION}_all.ipk" 2>/dev/null || \
+    curl -fsSL -o luci-app-openclash.ipk "https://cdn.jsdelivr.net/gh/vernesong/OpenClash@package/master/luci-app-openclash_${OC_VERSION}_all.ipk" 2>/dev/null || { fail "下载失败"; return; }
+    opkg install --force-depends luci-app-openclash.ipk >/dev/null 2>&1
+    info "下载 clash_meta 内核..."
+    mkdir -p /etc/openclash/core
+    curl -fsSL -o /tmp/clash_meta.tar.gz "https://cdn.jsdelivr.net/gh/vernesong/OpenClash@core/dev/meta/clash-linux-arm64.tar.gz" 2>/dev/null
+    tar xzf /tmp/clash_meta.tar.gz -C /etc/openclash/core/ 2>/dev/null
+    [ -f /etc/openclash/core/clash ] && mv /etc/openclash/core/clash /etc/openclash/core/clash_meta
+    chmod +x /etc/openclash/core/clash_meta 2>/dev/null
+    ln -sf /etc/openclash/core/clash_meta /etc/openclash/clash 2>/dev/null
+    ok "OpenClash 已安装"
+  fi
+
+  info "拉取订阅..."
+  mkdir -p /etc/openclash/config
+  curl -fsSL -o /etc/openclash/config/config.yaml -H "User-Agent: clash-verge/v2.4.5" "$SUB_URL" 2>/dev/null
+  cp /etc/openclash/config/config.yaml /etc/openclash/config.yaml 2>/dev/null
+  SZ=$(wc -c < /etc/openclash/config/config.yaml 2>/dev/null)
+  [ "$SZ" -gt 1000 ] && ok "订阅已拉取 (${SZ} 字节)" || { fail "订阅异常"; return; }
+
+  info "配置 uci..."
+  uci set openclash.config.enable="1"
+  uci set openclash.config.config_path="/etc/openclash/config/config.yaml"
+  uci set openclash.config.proxy_mode="rule"
+  uci set openclash.config.operation_mode="fake-ip"
+  uci commit openclash
+
+  info "启动 OpenClash..."
+  for pid in $(pidof clash_meta); do kill $pid 2>/dev/null; done
+  sleep 2
+  /etc/init.d/openclash enable >/dev/null 2>&1
+  /etc/init.d/openclash start >/dev/null 2>&1
+  sleep 12
+
+  if /etc/init.d/openclash status 2>&1 | grep -q running; then
+    ok "OpenClash 运行中"
+  else
+    info "尝试手动启动..."
+    nohup /etc/openclash/clash -d /etc/openclash -f /etc/openclash/config.yaml >/dev/null 2>&1 &
+    sleep 5
+    netstat -tln 2>/dev/null | grep -q 7890 && ok "手动启动成功" || { fail "启动失败"; return; }
+  fi
+
+  info "切换最优节点..."
+  SECRET=$(sed -n "s/.*secret: *//p" /etc/openclash/config.yaml 2>/dev/null | head -1 | tr -dc "a-zA-Z0-9")
+  if [ -n "$SECRET" ]; then
+    curl -s -X PUT -H "Authorization: Bearer $SECRET" -H "Content-Type: application/json" -d "{\"name\":\"$BEST_NODE\"}" "http://127.0.0.1:9090/proxies/%E5%AE%9D%E8%B4%9D%E4%BA%91" >/dev/null 2>&1
+    ok "已切换到 $BEST_NODE"
+  fi
+
+  echo ""
+  ok "OpenClash 配置完成！"
+  info "控制台: http://192.168.66.1:9090"
+  info "代理端口: 7890 (HTTP) / 7893 (混合)"
+  pause
+}
+
 # ========== 功能1: 全自动安装 ==========
 full_install() {
   section "全自动安装: Docker + 路由狗 + Docker管理器"
@@ -393,9 +468,10 @@ main_menu() {
   menu "3" "OpenClash AI 节点优化 (订阅/测速/切换)";
   menu "4" "系统健康检查";
   menu "5" "卸载 / 清理";
+  menu "6" "配置 OpenClash (订阅/内核/切换节点)";
   menu "0" "退出";
   echo ""
-  printf "%b  请输入选项 [0-5]: %b" "$CYAN" "$NC"; read MAIN_CHOICE
+  printf "%b  请输入选项 [0-6]: %b" "$CYAN" "$NC"; read MAIN_CHOICE
   echo ""
   case "$MAIN_CHOICE" in
     1) full_install;;
@@ -403,6 +479,7 @@ main_menu() {
     3) ai_node_optimize;;
     4) health_report; pause;;
     5) uninstall_clean;;
+    6) openclash_install;;
     0) echo "  再见！"; exit 0;;
     *) warn "无效选项，请重新输入"; sleep 1; main_menu;;
   esac
